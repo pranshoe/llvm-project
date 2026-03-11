@@ -13,6 +13,7 @@ import shutil
 import tempfile
 import threading
 import traceback
+import ctypes
 from io import StringIO
 
 from lit.ShCommands import GlobItem, Command
@@ -20,7 +21,6 @@ import lit.ShUtil as ShUtil
 import lit.Test as Test
 import lit.util
 from lit.BooleanExpression import BooleanExpression
-
 
 class InternalShellError(Exception):
     def __init__(self, command, message):
@@ -48,6 +48,132 @@ class TestUpdaterException(Exception):
     def __init__(self, message):
         super().__init__(message)
 
+def _safe_close(fd):
+    if fd is not None:
+        try: os.close(fd)
+        except OSError: pass
+
+class MockOpen:
+    def __init__(self, tool_func, args, cwd, stdin, stdout, stderr):
+        self.args = args
+        self.cwd = cwd
+        self.returncode = None
+
+        self.stdin_read, self.stdin_write = None, None
+        self.stdout_read, self.stdout_write = None, None
+        self.stderr_read, self.stderr_write = None, None
+
+        if stdin == subprocess.PIPE:
+            self.stdin_read, self.stdin_write = os.pipe()
+            self.stdin = os.fdopen(self.stdin_write, "wb")
+        else:
+            self.stdin = None # Matches real Popen behavior
+
+        if stdout == subprocess.PIPE:
+            self.stdout_read, self.stdout_write = os.pipe()
+            self.stdout = os.fdopen(self.stdout_read, "rb")
+        else:
+            self.stdout = None
+
+        if stderr == subprocess.PIPE:
+            self.stderr_read, self.stderr_write = os.pipe()
+            self.stderr = os.fdopen(self.stderr_read, "rb")
+        else:
+            self.stderr = None
+
+        self.pid = os.fork()
+
+        if self.pid == 0:
+            try:
+                _safe_close(self.stdout_read)
+                _safe_close(self.stderr_read)
+                _safe_close(self.stdin_write)
+
+                os.chdir(self.cwd)
+
+                if self.stdin_read is not None:
+                    in_fd = self.stdin_read
+                elif hasattr(stdin, "fileno"):
+                    try: stdin.seek(0)
+                    except Exception: pass
+                    in_fd = stdin.fileno()
+                else:
+                    in_fd = os.open(os.devnull, os.O_RDONLY)
+                
+                if self.stdout_write is not None:
+                    out_fd = self.stdout_write
+                elif hasattr(stdout, "fileno"):
+                    out_fd = stdout.fileno()
+                else:
+                    out_fd = os.open(os.devnull, os.O_WRONLY)
+
+                if self.stderr_write is not None:
+                    err_fd = self.stderr_write
+                elif stderr == subprocess.STDOUT:
+                    err_fd = out_fd
+                elif hasattr(stderr, "fileno"):
+                    err_fd = stderr.fileno()
+                else:
+                    err_fd = os.open(os.devnull, os.O_WRONLY)
+
+                os.dup2(in_fd, 0)
+                os.dup2(out_fd, 1)
+                os.dup2(err_fd, 2)
+
+                encoded_args = [arg.encode('utf-8') for arg in self.args]
+                argc = len(self.args)
+                argv = (ctypes.c_char_p * (argc+1))()
+
+
+                for i, arg in enumerate(encoded_args):
+                    argv[i] = arg
+                argv[argc] = None
+
+                tool_func.argtypes = [ctypes.c_int, ctypes.POINTER(ctypes.c_char_p)]
+                tool_func.restype = ctypes.c_int
+
+                exit_code = tool_func(argc, argv)
+
+                try:
+                    libc = ctypes.CDLL(None)
+                    libc.fflush(None)
+                except Exception:
+                    pass
+
+                os._exit(exit_code)
+                
+            except Exception as e:
+                os.write(2, f"Child crash: {e}\n".encode())
+                os._exit(1)
+
+        else:
+            _safe_close(self.stdout_write)
+            _safe_close(self.stderr_write)
+            _safe_close(self.stdin_read)
+
+    def wait(self):
+        if self.returncode is None:
+            _, status = os.waitpid(self.pid, 0)
+            if hasattr(os, 'waitstatus_to_exitcode'):
+                self.returncode = os.waitstatus_to_exitcode(status)
+            else:
+                self.returncode = status >> 8
+        return self.returncode
+        
+    def communicate(self):
+        out_data = b""
+        err_data = b""
+        
+        if self.stdout is not None and not self.stdout.closed:
+            try: out_data = self.stdout.read()
+            except ValueError: pass
+            
+        if self.stderr is not None and not self.stderr.closed:
+            try: err_data = self.stderr.read()
+            except ValueError: pass
+            
+        self.wait()
+        return (out_data, err_data)
 
 kIsWindows = platform.system() == "Windows"
 
@@ -72,6 +198,9 @@ kDevNull = "/dev/null"
 # empty as a result of conditinal substitution.
 kPdbgRegex = "%dbg\\(([^)'\"]*)\\)((?:.|\\n)*)"
 
+# _pythontools_lib = ctypes.CDLL("build/lib/libLLVMPythonTools.so")
+_llc_main = ctypes.CDLL("build/lib/libllvmllcpy.so", mode = os.RTLD_LOCAL | os.RTLD_DEEPBIND).llc_main
+_opt_main = ctypes.CDLL("build/lib/libllvmoptpy.so", mode = os.RTLD_LOCAL | os.RTLD_DEEPBIND).opt_main
 
 def buildPdbgCommand(msg, cmd):
     res = f"%dbg({msg}) {cmd}"
@@ -337,7 +466,6 @@ def updateEnv(env, args):
             break
         env.env[key] = val
     return args[arg_idx_next:]
-
 
 def executeBuiltinCd(cmd, shenv):
     """executeBuiltinCd - Change the current directory."""
@@ -1004,7 +1132,15 @@ def _executeShCmd(cmd, shenv, results, timeoutHelper):
             old_umask = -1
             if cmd_shenv.umask != -1:
                 old_umask = os.umask(cmd_shenv.umask)
-            procs.append(
+            # print(f"DEBUG: args={args}, executable={executable}, cwd={cmd_shenv.cwd}")
+            if(os.path.basename(executable) == "llc"):
+                # print(args, cmd_shenv.cwd, stdin, stdout, stderr)
+                procs.append(MockOpen(_llc_main, args, cmd_shenv.cwd, stdin, stdout, stderr))
+            elif(os.path.basename(executable) == "opt"):
+                # print(args, cmd_shenv.cwd, stdin, stdout, stderr)
+                procs.append(MockOpen(_opt_main, args, cmd_shenv.cwd, stdin, stdout, stderr))
+            else:
+                procs.append(
                 subprocess.Popen(
                     args,
                     cwd=cmd_shenv.cwd,

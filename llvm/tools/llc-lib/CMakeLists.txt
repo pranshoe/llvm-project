@@ -1,0 +1,35 @@
+set(LLVM_LINK_COMPONENTS
+  AllTargetsAsmParsers
+  AllTargetsCodeGens
+  AllTargetsDescs
+  AllTargetsInfos
+  Analysis
+  AsmPrinter
+  CodeGen
+  CodeGenTypes
+  Core
+  IPO
+  IRPrinter
+  IRReader
+  MC
+  MIRParser
+  Passes
+  Plugins
+  Remarks
+  ScalarOpts
+  SelectionDAG
+  Support
+  Target
+  TargetParser
+  TransformUtils
+  Vectorize
+  )
+
+add_llvm_library(llvmllcpy
+  SHARED
+  llc.cpp
+  NewPMDriver.cpp
+  PARTIAL_SOURCES_INTENDED
+  DEPENDS
+  intrinsics_gen
+)

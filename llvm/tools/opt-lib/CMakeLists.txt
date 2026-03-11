@@ -1,0 +1,42 @@
+set(LLVM_LINK_COMPONENTS
+  AllTargetsAsmParsers
+  AllTargetsCodeGens
+  AllTargetsDescs
+  AllTargetsInfos
+  AggressiveInstCombine
+  Analysis
+  AsmParser
+  BitWriter
+  CFGuard
+  CodeGen
+  Core
+  Coroutines
+  Extensions
+  IPO
+  IRReader
+  IRPrinter
+  InstCombine
+  Instrumentation
+  MC
+  ObjCARCOpts
+  Plugins
+  Remarks
+  ScalarOpts
+  Support
+  Target
+  TargetParser
+  TransformUtils
+  Vectorize
+  Passes
+  )
+
+# We don't want to link this into libLLVM
+add_llvm_library(llvmoptpy
+  SHARED
+  NewPMDriver.cpp
+  optdriver.cpp
+  opt.cpp
+  PARTIAL_SOURCES_INTENDED
+  DEPENDS
+  intrinsics_gen
+)
