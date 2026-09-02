@@ -125,6 +125,9 @@
 #include "llvm/Transforms/Scalar/LowerConstantIntrinsics.h"
 #include "llvm/Transforms/Scalar/LowerExpectIntrinsic.h"
 #include "llvm/Transforms/Scalar/LowerMatrixIntrinsics.h"
+#include "llvm/Transforms/Scalar/MLTilingPass.h"
+#include "llvm/Transforms/Scalar/MLUnrollPass.h"
+#include "llvm/Transforms/Scalar/MLFusionPass.h"
 #include "llvm/Transforms/Scalar/MemCpyOptimizer.h"
 #include "llvm/Transforms/Scalar/MergeICmps.h"
 #include "llvm/Transforms/Scalar/MergedLoadStoreMotion.h"
@@ -1345,6 +1348,11 @@ PassBuilder::buildModuleSimplificationPipeline(OptimizationLevel Level,
 void PassBuilder::addVectorPasses(OptimizationLevel Level,
                                   FunctionPassManager &FPM,
                                   ThinOrFullLTOPhase LTOPhase) {
+  // Machine Learning Loop Optimization Pipeline (Runs before Vectorizer)
+  FPM.addPass(MLFusionPass());
+  FPM.addPass(MLTilingPass());
+  FPM.addPass(MLUnrollPass());
+
   FPM.addPass(LoopVectorizePass(
       LoopVectorizeOptions(!PTO.LoopInterleaving, !PTO.LoopVectorization)));
 
